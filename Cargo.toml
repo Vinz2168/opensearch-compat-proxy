@@ -7,10 +7,17 @@ edition = "2021"
 axum = "0.8"
 http-body = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
-reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 bytes = "1"
 futures-util = "0.3"
 serde_json = "1"
+
+[features]
+# Off by default: pulls in rustls + aws-lc-rs + the OS trust store, which
+# panics at startup on minimal container images with no CA bundle installed
+# (e.g. plain debian-slim). Only needed if UPSTREAM is an https:// OpenSearch
+# endpoint - enable with `cargo build --release --features tls`.
+tls = ["reqwest/rustls"]
 
 [profile.release]
 opt-level = 3
