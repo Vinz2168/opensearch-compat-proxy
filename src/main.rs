@@ -1,13 +1,17 @@
 use axum::{
-    body::{to_bytes, Body},
+    body::Body,
     extract::{Request, State},
-    http::{header::HOST, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{
+        header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING},
+        HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
+    },
     response::IntoResponse,
     routing::any,
     Router,
 };
 use bytes::Bytes;
 use futures_util::TryStreamExt;
+use http_body::Body as _;
 use std::net::SocketAddr;
 
 const PRODUCT_HEADER: &str = "x-elastic-product";
@@ -58,8 +62,10 @@ async fn proxy(State(state): State<AppState>, req: Request) -> axum::response::R
 
     let mut out_headers = reqwest::header::HeaderMap::new();
     for (name, value) in req.headers().iter() {
-        // Let reqwest derive its own Host header for the upstream request.
-        if name == HOST {
+        // Let reqwest/hyper derive their own Host and body-framing headers for the
+        // upstream request; forwarding the client's originals could conflict with how
+        // the streamed body below actually gets framed on the wire.
+        if name == HOST || name == CONTENT_LENGTH || name == TRANSFER_ENCODING {
             continue;
         }
         if let (Ok(n), Ok(v)) = (
@@ -70,27 +76,22 @@ async fn proxy(State(state): State<AppState>, req: Request) -> axum::response::R
         }
     }
 
-    // NOTE: request bodies are buffered in full before being forwarded (simplest correct
-    // implementation for a compatibility shim). If you need to proxy very large bulk
-    // payloads without buffering them in memory, switch this to a streamed reqwest::Body
-    // built from req.into_body().into_data_stream().
-    let body_bytes = match to_bytes(req.into_body(), usize::MAX).await {
-        Ok(b) => b,
-        Err(err) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("failed to read request body: {err}"),
-            )
-                .into_response();
-        }
-    };
+    // Body is streamed through to the upstream request without buffering it in memory,
+    // so a multi-gigabyte `_bulk` payload is forwarded chunk by chunk as it arrives.
+    // Bodyless requests (GET/HEAD with no payload) are detected via the body's size hint
+    // and sent with no body at all, rather than as an empty chunked stream.
+    let is_empty_body = req.body().size_hint().exact() == Some(0);
+    let body_stream = req
+        .into_body()
+        .into_data_stream()
+        .map_err(std::io::Error::other);
 
     let mut upstream_req = state
         .client
         .request(reqwest_method(&method), &target_url)
         .headers(out_headers);
-    if !body_bytes.is_empty() {
-        upstream_req = upstream_req.body(body_bytes);
+    if !is_empty_body {
+        upstream_req = upstream_req.body(reqwest::Body::wrap_stream(body_stream));
     }
 
     let upstream_resp = match upstream_req.send().await {
@@ -130,7 +131,8 @@ async fn proxy(State(state): State<AppState>, req: Request) -> axum::response::R
     let body: Body = if is_root_get {
         // The root `GET /` response is where clients read `version.number` to decide
         // whether they support talking to this server at all - rewrite it to the last
-        // Apache-2.0 Elasticsearch release OpenSearch stayed wire-compatible with.
+        // Apache-2.0 Elasticsearch release OpenSearch stayed wire-compatible with. This
+        // one response is small and always buffered, unlike everything else below.
         match upstream_resp.bytes().await {
             Ok(bytes) => {
                 let rewritten = rewrite_root_response(&bytes, &state.fake_version)

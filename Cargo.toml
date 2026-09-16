@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = "0.8"
+http-body = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 reqwest = { version = "0.13", default-features = false, features = ["stream", "rustls"] }
 bytes = "1"

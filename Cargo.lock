@@ -683,6 +683,7 @@ dependencies = [
  "axum",
  "bytes",
  "futures-util",
+ "http-body",
  "reqwest",
  "serde_json",
  "tokio",

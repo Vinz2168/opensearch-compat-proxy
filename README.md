@@ -30,15 +30,35 @@ level instead:
 - Rewrites `version.number` in the root `GET /` response to a configurable
   fake version (`7.10.2` by default — the last version OpenSearch stayed
   wire-compatible with).
-- Passes every other request/response through untouched, streamed.
+- Streams every other request and response body through untouched, without
+  buffering it in memory — a multi-gigabyte `_bulk` request is forwarded
+  chunk by chunk as it arrives, not read into RAM first.
 
 ## Usage
 
+### Prebuilt binary
+
+Download the binary for your platform from the
+[releases page](https://github.com/Vinz2168/opensearch-compat-proxy/releases),
+then:
+
 ```sh
-cargo run --release
+chmod +x opensearch-compat-proxy
+UPSTREAM=http://your-opensearch-host:9200 ./opensearch-compat-proxy
 ```
 
-Environment variables (all optional):
+### From source
+
+```sh
+cargo build --release
+UPSTREAM=http://your-opensearch-host:9200 ./target/release/opensearch-compat-proxy
+# or, for a quick one-off run:
+UPSTREAM=http://your-opensearch-host:9200 cargo run --release
+```
+
+### Configuration
+
+All configuration is via environment variables (all optional):
 
 | Variable          | Default                   | Meaning                                   |
 |--------------------|----------------------------|--------------------------------------------|
@@ -47,20 +67,31 @@ Environment variables (all optional):
 | `FAKE_ES_VERSION`  | `7.10.2`                   | Version string reported in `GET /`         |
 
 Point your Elastic client at the proxy's `LISTEN` address instead of
-OpenSearch directly.
+OpenSearch directly — e.g. if you were configuring the client with
+`http://opensearch:9200`, point it at `http://<proxy-host>:9201` instead.
 
-## Known limitation: request bodies are buffered, not streamed
+### Quick check
 
-Response bodies are streamed through untouched (except the one small root
-`GET /` body, which has to be buffered to rewrite its JSON). **Request**
-bodies, however, are currently read into memory in full before being
-forwarded upstream — this keeps the implementation simple and correct, but
-means a multi-gigabyte `_bulk` request will be fully buffered in the proxy's
-memory rather than streamed through.
+```sh
+curl -s http://127.0.0.1:9201/ | python3 -m json.tool   # version.number should read 7.10.2
+curl -sD - http://127.0.0.1:9201/ -o /dev/null | grep -i x-elastic-product
+```
 
-If that matters for your workload, swap the `to_bytes(req.into_body(), ...)`
-call in `src/main.rs` for a streamed `reqwest::Body` built from
-`req.into_body().into_data_stream()`.
+## Streaming
+
+Both directions are streamed without buffering, with one deliberate
+exception: the root `GET /` response is small and always buffered, because
+its JSON body has to be parsed and rewritten (`version.number`) before being
+sent back. Everything else — including large `_bulk` request bodies and
+large response bodies — is forwarded chunk by chunk via
+`Body::into_data_stream()` / `reqwest::Body::wrap_stream()`, never fully
+read into memory. Verified by capturing the raw bytes the proxy sends
+upstream for a POST body: correct `Transfer-Encoding: chunked` framing, no
+stray `Content-Length` left over from the original request.
+
+Bodyless requests (a plain `GET`/`HEAD`) are detected via the request body's
+size hint and sent upstream with no body at all, rather than as an empty
+chunked stream.
 
 ## What this does *not* fix
 
