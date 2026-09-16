@@ -56,6 +56,16 @@ UPSTREAM=http://your-opensearch-host:9200 ./target/release/opensearch-compat-pro
 UPSTREAM=http://your-opensearch-host:9200 cargo run --release
 ```
 
+By default the binary has no TLS support at all (`UPSTREAM` must be
+`http://`), which keeps it small and avoids a startup panic some minimal
+container base images hit when reqwest's TLS backend tries to load a
+system CA bundle that isn't there. If `UPSTREAM` needs to be `https://`,
+build with the `tls` feature instead:
+
+```sh
+cargo build --release --features tls
+```
+
 ### Configuration
 
 All configuration is via environment variables (all optional):
